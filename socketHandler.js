@@ -29,7 +29,25 @@ module.exports = (io) => {
         patient.dequeue();
       }
     });
+    
 
+    // handling room on disconnect
+     if (socket.roomId) {
+       const roomId = socket.roomId;
+       socket.leave(roomId);
+
+       // Check if there are still users in the room
+       const roomSockets = io.sockets.adapter.rooms.get(roomId);
+
+       if (!roomSockets || roomSockets.size === 0) {
+         console.log(`Room ${roomId} is empty now.`);
+       } else {
+         // Notify remaining user and force disconnect
+         const remainingUserId = [...roomSockets][0]; // Get the other user
+         io.to(remainingUserId).emit("FORCE_DISCONNECT");
+         io.sockets.sockets.get(remainingUserId)?.disconnect();
+       }
+     }
     // Handle ping
     socket.on("PING", () => {
       console.log("PING FROM", socket.id);
@@ -37,6 +55,9 @@ module.exports = (io) => {
     });
   });
 
+
+
+// functions made to use differently
   function isSocketConnected(socketId) {
     return io.sockets.sockets.has(socketId);
   }
