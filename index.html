@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Manual Socket Connection</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>Socket.IO Manual Connection</h1>
+    <button onclick="connectSocket()">Connect</button>
+    <button onclick="disconnectSocket()">Disconnect</button>
+    <p id="status">Status: Disconnected</p>
+
+    <script>
+        const socket = io("http://localhost:3000", { autoConnect: false });
+
+        function connectSocket() {
+            socket.connect();
+            document.getElementById("status").innerText = "Status: Connected";
+            
+            socket.emit("PING");
+            socket.on("PONG",()=>{
+                console.log('server ponged')
+            })
+            socket.on("PING", (data) => {
+                console.log('PING FROM SERVER ')
+                socket.emit("PONG")
+            });
+        }
+
+        function disconnectSocket() {
+            socket.disconnect();
+            document.getElementById("status").innerText = "Status: Disconnected";
+            console.log("Socket disconnected");
+        }
+    </script>
+</body>
+</html>
