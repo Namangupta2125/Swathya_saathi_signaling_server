@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 require("dotenv").config();
 const keyPath = path.join(__dirname, "Key 7_2_2025, 10_32_47 pm.pk");
 const privateKey = fs.readFileSync(keyPath, "utf8");
- 
+
 const patient = new Queue();
 const doctor = new Queue();
 
@@ -28,26 +28,35 @@ module.exports = (io) => {
       } else if (patient.front() === socket.id) {
         patient.dequeue();
       }
+
+      // handling room on disconnect
+      if (socket.roomId) {
+        const roomId = socket.roomId;
+        socket.leave(roomId);
+
+        // Check if there are still users in the room
+        const roomSockets = io.sockets.adapter.rooms.get(roomId);
+
+        if (!roomSockets || roomSockets.size === 0) {
+          console.log(`Room ${roomId} is empty now.`);
+        } else {
+          // Notify remaining user and force disconnect
+          const remainingUserId = [...roomSockets][0]; // Get the other user
+          io.to(remainingUserId).emit("FORCE_DISCONNECT");
+          io.sockets.sockets.get(remainingUserId)?.disconnect();
+        }
+      }
     });
-    
 
-    // handling room on disconnect
-     if (socket.roomId) {
-       const roomId = socket.roomId;
-       socket.leave(roomId);
+    // Handle incoming messages from users
+    socket.on("MESSAGE", ({ roomId, message }) => {
+      console.log(`Message from ${socket.id} in room ${roomId}: ${message}`);
+      socket.to(roomId).emit("NEW_MESSAGE", {
+        sender: socket.id,
+        message,
+      });
+    });
 
-       // Check if there are still users in the room
-       const roomSockets = io.sockets.adapter.rooms.get(roomId);
-
-       if (!roomSockets || roomSockets.size === 0) {
-         console.log(`Room ${roomId} is empty now.`);
-       } else {
-         // Notify remaining user and force disconnect
-         const remainingUserId = [...roomSockets][0]; // Get the other user
-         io.to(remainingUserId).emit("FORCE_DISCONNECT");
-         io.sockets.sockets.get(remainingUserId)?.disconnect();
-       }
-     }
     // Handle ping
     socket.on("PING", () => {
       console.log("PING FROM", socket.id);
@@ -55,9 +64,7 @@ module.exports = (io) => {
     });
   });
 
-
-
-// functions made to use differently
+  // functions made to use differently
   function isSocketConnected(socketId) {
     return io.sockets.sockets.has(socketId);
   }
@@ -123,6 +130,10 @@ module.exports = (io) => {
       io.sockets.sockets.get(doc).join(roomId);
 
       console.log(`Room ${roomId} created for doctor ${doc} and patient ${pt}`);
+
+      // Store roomId in socket for later use
+      io.sockets.sockets.get(pt).roomId = roomId;
+      io.sockets.sockets.get(doc).roomId = roomId;
 
       // Notify users they are matched and joined in a room
       io.to(roomId).emit("ROOM_CREATED", {
