@@ -23,14 +23,40 @@ module.exports = (server) => {
     const { role } = socket.handshake.query;
 
     if (role === "DOCTOR") {
-      doctorQueue.enqueue(socket.id);
+      doctorQueue.enqueue(socket);
     } else {
-      patientQueue.enqueue(socket.id);
+      patientQueue.enqueue(socket);
     }
 
     console.log(`Client connected: ${socket.id} as ${role}`);
 
-    matchDoctorAndPatient(io);
+    function tryMatch() {
+      if (!doctorQueue.isEmpty() && !patientQueue.isEmpty()) {
+        const patientSocket = patientQueue.dequeue();
+        const doctorSocket = doctorQueue.dequeue();
+
+        if (!io.sockets.sockets.has(patientSocket.id) || !io.sockets.sockets.has(doctorSocket.id)) {
+          return;
+        }
+
+        const roomId = `room-${doctorSocket.id}-${patientSocket.id}`;
+
+        patientSocket.join(roomId);
+        doctorSocket.join(roomId);
+
+        patientSocket.roomId = roomId;
+        doctorSocket.roomId = roomId;
+
+        io.to(roomId).emit("ROOM_CREATED", { roomId });
+
+        setTimeout(() => {
+          const meetingLink = generateJitsiMeetingLink(roomId);
+          io.to(roomId).emit("MEETING_LINK", { meetingLink });
+        }, 1000);
+      }
+    }
+
+    const matchInterval = setInterval(tryMatch, 1000);
 
     socket.on("SEND_PRESCRIPTION", ({ roomId, prescription }) => {
       io.to(roomId).emit("RECEIVE_PRESCRIPTION", { prescription });
@@ -43,53 +69,14 @@ module.exports = (server) => {
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
 
-      if (doctorQueue.front() === socket.id) {
-        doctorQueue.dequeue();
-      } else if (patientQueue.front() === socket.id) {
-        patientQueue.dequeue();
-      }
-
       if (socket.roomId) {
-        const roomId = socket.roomId;
-        socket.leave(roomId);
-
-        const roomSockets = io.sockets.adapter.rooms.get(roomId);
-        if (!roomSockets || roomSockets.size === 0) {
-          console.log(`Room ${roomId} is now empty.`);
-        } else {
-          const remainingUserId = [...roomSockets][0];
-          io.to(remainingUserId).emit("FORCE_DISCONNECT");
-          io.sockets.sockets.get(remainingUserId)?.disconnect();
-        }
+        io.to(socket.roomId).emit("FORCE_DISCONNECT");
+        io.socketsLeave(socket.roomId);
       }
+
+      clearInterval(matchInterval);
     });
   });
-
-  function matchDoctorAndPatient(io) {
-    if (!doctorQueue.isEmpty() && !patientQueue.isEmpty()) {
-      const patientId = patientQueue.dequeue();
-      const doctorId = doctorQueue.dequeue();
-
-      if (!io.sockets.sockets.has(patientId) || !io.sockets.sockets.has(doctorId)) {
-        return;
-      }
-
-      const roomId = `room-${doctorId}-${patientId}`;
-
-      io.sockets.sockets.get(patientId).join(roomId);
-      io.sockets.sockets.get(doctorId).join(roomId);
-
-      io.sockets.sockets.get(patientId).roomId = roomId;
-      io.sockets.sockets.get(doctorId).roomId = roomId;
-
-      io.to(roomId).emit("ROOM_CREATED", { roomId, doctor: doctorId, patient: patientId });
-
-      setTimeout(() => {
-        const meetingLink = generateJitsiMeetingLink(roomId);
-        io.to(roomId).emit("MEETING_LINK", { roomId, meetingLink });
-      }, 1000);
-    }
-  }
 
   function generateJitsiJWT(roomId) {
     const payload = {
