@@ -1,30 +1,37 @@
 class Queue {
   constructor() {
-    this.items = [];
+    this.items = new Map(); // Use a Map for efficient lookup and deletion
   }
 
-  enqueue(element) {
-    this.items.push(element);
+  enqueue(id) {
+    this.items.set(id, Date.now()); // Store timestamp to track waiting time
   }
 
   dequeue() {
-    return this.items.shift();
+    if (this.isEmpty()) return null;
+    const firstKey = this.front();
+    this.items.delete(firstKey);
+    return firstKey;
   }
 
   front() {
-    return this.items[0];
+    return this.isEmpty() ? null : this.items.keys().next().value;
   }
 
   isEmpty() {
-    return this.items.length === 0;
+    return this.items.size === 0;
   }
 
   size() {
-    return this.items.length;
+    return this.items.size;
+  }
+
+  remove(id) {
+    this.items.delete(id);
   }
 
   print() {
-    console.log(this.items.join(" <- "));
+    console.log([...this.items.keys()].join(" <- "));
   }
 }
 
