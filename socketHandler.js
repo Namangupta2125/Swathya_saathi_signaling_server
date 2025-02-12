@@ -3,159 +3,72 @@ const fs = require("fs");
 const path = require("path");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
+
 const keyPath = path.join(__dirname, "Key 7_2_2025, 10_32_47 pm.pk");
 const privateKey = fs.readFileSync(keyPath, "utf8");
 
-const patient = new Queue();
-const doctor = new Queue();
+const patientQueue = new Queue();
+const doctorQueue = new Queue();
+const activeConnections = new Map();
 
 module.exports = (io) => {
   io.on("connection", (socket) => {
-    // Checking role and entering socket ID into the queue
     const { role } = socket.handshake.query;
-    if (role === "DOCTOR") doctor.enqueue(socket.id);
-    else patient.enqueue(socket.id);
+    activeConnections.set(socket.id, role);
 
-    console.log(`Client connected with role: ${role} and id ${socket.id}`);
+    if (role === "DOCTOR") doctorQueue.enqueue(socket.id);
+    else patientQueue.enqueue(socket.id);
 
-    // Handle disconnection
     socket.on("disconnect", () => {
-      console.log(`Client disconnected: ${socket.id}`);
+      activeConnections.delete(socket.id);
+      doctorQueue.remove(socket.id);
+      patientQueue.remove(socket.id);
+    });
 
-      // Remove disconnected user from queue 
-      if (doctor.front() === socket.id) {
-        doctor.dequeue();
-      } else if (patient.front() === socket.id) {
-        patient.dequeue();
-      }
+    function matchPatients() {
+      while (!doctorQueue.isEmpty() && !patientQueue.isEmpty()) {
+        const doc = doctorQueue.front();
+        const pt = patientQueue.front();
 
-      // handling room on disconnect
-      if (socket.roomId) {
-        const roomId = socket.roomId;
-        socket.leave(roomId);
-
-        // Check if there are still users in the room
-        const roomSockets = io.sockets.adapter.rooms.get(roomId);
-
-        if (!roomSockets || roomSockets.size === 0) {
-          console.log(`Room ${roomId} is empty now.`);
-        } else {
-          // Notify remaining user and force disconnect
-          const remainingUserId = [...roomSockets][0]; // Get the other user
-          io.to(remainingUserId).emit("FORCE_DISCONNECT");
-          io.sockets.sockets.get(remainingUserId)?.disconnect();
+        if (!activeConnections.has(pt)) {
+          patientQueue.dequeue();
+          continue;
         }
+
+        if (!activeConnections.has(doc)) {
+          doctorQueue.dequeue();
+          continue;
+        }
+
+        patientQueue.dequeue();
+        doctorQueue.dequeue();
+
+        const roomId = `room-${doc}-${pt}`;
+        io.to(doc).emit("ROOM_CREATED", { roomId });
+        io.to(pt).emit("ROOM_CREATED", { roomId });
+
+        const meetingLink = generateJitsiMeetingLink(roomId);
+        io.to(roomId).emit("MEETING_LINK", { roomId, meetingLink });
       }
-    });
+    }
 
-    // Handle incoming messages from users
-    socket.on("MESSAGE", ({ roomId, message }) => {
-      console.log(`Message from ${socket.id} in room ${roomId}: ${message}`);
-      socket.to(roomId).emit("NEW_MESSAGE", {
-        sender: socket.id,
-        message,
-      });
-    });
-
-    // Handle ping
-    socket.on("PING", () => {
-      console.log("PING FROM", socket.id);
-      socket.emit("PONG");
-    });
+    setInterval(matchPatients, 1000);
   });
 
-  // functions made to use differently
-  function isSocketConnected(socketId) {
-    return io.sockets.sockets.has(socketId);
+  function generateJitsiMeetingLink(roomId) {
+    const jwtToken = generateJitsiJWT(roomId);
+    return `https://8x8.vc/${process.env.JAAS_TENANT}/${roomId}#jwt=${jwtToken}`;
   }
 
   function generateJitsiJWT(roomId) {
     const payload = {
       aud: "jitsi",
-      iss: "chat", 
-      sub: "8x8.vc", 
+      iss: "chat",
+      sub: "8x8.vc",
       room: roomId,
-      exp: Math.floor(Date.now() / 1000) + 3600, 
-      context: {
-        user: {
-          avatar: "",
-          name: "Doctor-Patient",
-          email: "gutpanamandream21sd@gmail.com",
-          id: roomId,
-        },
-        features: {
-          livestreaming: false,
-          recording: true,
-          transcription: true,
-        },
-      },
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      context: { user: { name: "Doctor-Patient" } },
     };
-
     return jwt.sign(payload, privateKey, { algorithm: "RS256" });
   }
-
-  function generateJitsiMeetingLink(roomId) {
-    const tenant = process.env.JAAS_TENANT;
-    const jwtToken = generateJitsiJWT(roomId);
-    return `https://8x8.vc/${tenant}/${roomId}#jwt=${jwtToken}`;
-  }
-
-  async function job() {
-    if (!doctor.isEmpty() && !patient.isEmpty()) {
-      const pt = patient.front();
-      const doc = doctor.front();
-
-      // Check if both are still connected
-      if (!isSocketConnected(pt)) {
-        console.log(`Patient ${pt} disconnected before match.`);
-        patient.dequeue();
-        return;
-      }
-
-      if (!isSocketConnected(doc)) {
-        console.log(`Doctor ${doc} disconnected before match.`);
-        doctor.dequeue();
-        return;
-      }
-
-      // Remove matched users from the queue
-      patient.dequeue();
-      doctor.dequeue();
-
-      // Generate a unique room ID
-      const roomId = `room-${doc}-${pt}`;
-
-      // Add both users to the room **before** generating the Jitsi link
-      io.sockets.sockets.get(pt).join(roomId);
-      io.sockets.sockets.get(doc).join(roomId);
-
-      console.log(`Room ${roomId} created for doctor ${doc} and patient ${pt}`);
-
-      // Store roomId in socket for later use
-      io.sockets.sockets.get(pt).roomId = roomId;
-      io.sockets.sockets.get(doc).roomId = roomId;
-
-      // Notify users they are matched and joined in a room
-      io.to(roomId).emit("ROOM_CREATED", {
-        roomId,
-        doctor: doc, 
-        patient: pt,
-      });
-
-      // Wait 1 second before sending the meeting link
-      setTimeout(() => {
-        const meetingLink = generateJitsiMeetingLink(roomId);
-        io.to(roomId).emit("MEETING_LINK", {
-          roomId,
-          meetingLink,
-        });
-
-        console.log(`Meeting link sent: ${meetingLink}`);
-      }, 1000);
-    }
-  }
-
-  setInterval(async () => {
-    await job();
-  }, 1000);
 };
