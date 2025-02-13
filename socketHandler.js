@@ -1,95 +1,153 @@
 const Queue = require("./queue");
+const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const path = require("path");
-const jwt = require("jsonwebtoken");
 require("dotenv").config();
-const { Server } = require("socket.io");
 
-const keyPath = path.join(__dirname, "Key 7_2_2025, 10_32_47 pm.pk");
-const privateKey = fs.readFileSync(keyPath, "utf8");
+class ConsultationManager {
+  constructor() {
+    this.patientQueue = new Queue();
+    this.doctorQueue = new Queue();
+    this.activeRooms = new Map();
+    this.privateKey = fs.readFileSync(
+      path.join(__dirname, "Key 7_2_2025, 10_32_47 pm.pk"),
+      "utf8"
+    );
+  }
 
-const patientQueue = new Queue();
-const doctorQueue = new Queue();
+  handleConnection(socket, io) {
+    const { role, patientId } = socket.handshake.query;
 
-module.exports = (server) => {
-  const io = new Server(server, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"],
-    },
-  });
-
-  io.on("connection", (socket) => {
-    const { role } = socket.handshake.query;
     console.log(`New connection: ${socket.id}, Role: ${role}`);
 
     if (role === "DOCTOR") {
-      doctorQueue.enqueue(socket);
-      console.log(`Doctor added to queue. Queue size: ${doctorQueue.size()}`);
-    } else {
-      patientQueue.enqueue(socket);
-      console.log(`Patient added to queue. Queue size: ${patientQueue.size()}`);
+      this.doctorQueue.enqueue({ socketId: socket.id, timestamp: Date.now() });
+      this.attemptMatching(io);
+    } else if (role === "PATIENT") {
+      this.patientQueue.enqueue({
+        socketId: socket.id,
+        patientId: patientId || "UNKNOWN",
+        timestamp: Date.now(),
+      });
+      this.attemptMatching(io);
     }
 
-    function tryMatch() {
-      console.log(`Checking match... Doctor Queue: ${doctorQueue.size()}, Patient Queue: ${patientQueue.size()}`);
+    this.setupSocketHandlers(socket, io);
+  }
 
-      if (!doctorQueue.isEmpty() && !patientQueue.isEmpty()) {
-        console.log("Match found! Connecting doctor and patient...");
+  setupSocketHandlers(socket, io) {
+    socket.on("disconnect", () => this.handleDisconnect(socket, io));
+    socket.on("MESSAGE", ({ roomId, message }) =>
+      this.handleMessage(socket, roomId, message, io)
+    );
+    socket.on("END_CALL", () => this.handleEndCall(socket, io));
+  }
 
-        const patientSocket = patientQueue.dequeue();
-        const doctorSocket = doctorQueue.dequeue();
+  handleDisconnect(socket, io) {
+    console.log(`Disconnection: ${socket.id}`);
 
-        if (!io.sockets.sockets.has(patientSocket.id) || !io.sockets.sockets.has(doctorSocket.id)) {
-          console.log("Error: One of the sockets is disconnected.");
-          return;
-        }
+    this.patientQueue.remove((item) => item.socketId === socket.id);
+    this.doctorQueue.remove((item) => item.socketId === socket.id);
 
-        const roomId = `room-${doctorSocket.id}-${patientSocket.id}`;
-        patientSocket.join(roomId);
-        doctorSocket.join(roomId);
-
-        patientSocket.roomId = roomId;
-        doctorSocket.roomId = roomId;
-
-        console.log(`Room Created: ${roomId}`);
-
-        io.to(roomId).emit("ROOM_CREATED", { roomId });
-
-        setTimeout(() => {
-          const meetingLink = generateJitsiMeetingLink(roomId);
-          console.log(`Meeting Link Generated: ${meetingLink}`);
-          io.to(roomId).emit("MEETING_LINK", { meetingLink });
-        }, 1000);
-      }
+    if (socket.roomId) {
+      this.cleanupRoom(socket.roomId, io);
     }
 
-    const matchInterval = setInterval(tryMatch, 1000);
+    this.attemptMatching(io);
+  }
 
-    socket.on("SEND_PRESCRIPTION", ({ roomId, prescription }) => {
-      console.log(`Prescription sent in ${roomId}`);
-      io.to(roomId).emit("RECEIVE_PRESCRIPTION", { prescription });
-    });
+  handleMessage(socket, roomId, message, io) {
+    if (this.activeRooms.has(roomId)) {
+      io.to(roomId).emit("NEW_MESSAGE", { sender: socket.id, message });
+    }
+  }
 
-    socket.on("SEND_NOTES", ({ roomId, notes }) => {
-      console.log(`Notes sent in ${roomId}`);
-      io.to(roomId).emit("RECEIVE_NOTES", { notes });
-    });
+  handleEndCall(socket, io) {
+    if (socket.roomId) {
+      this.cleanupRoom(socket.roomId, io);
+    }
+  }
 
-    socket.on("disconnect", () => {
-      console.log(`Client disconnected: ${socket.id}`);
+  async attemptMatching(io) {
+    while (!this.patientQueue.isEmpty() && !this.doctorQueue.isEmpty()) {
+      const patient = this.patientQueue.peek();
+      const doctor = this.doctorQueue.peek();
 
-      if (socket.roomId) {
-        console.log(`Forcing disconnect for room: ${socket.roomId}`);
-        io.to(socket.roomId).emit("FORCE_DISCONNECT");
-        io.socketsLeave(socket.roomId);
+      if (!this.isSocketConnected(io, patient.socketId)) {
+        this.patientQueue.dequeue();
+        continue;
       }
 
-      clearInterval(matchInterval);
-    });
-  });
+      if (!this.isSocketConnected(io, doctor.socketId)) {
+        this.doctorQueue.dequeue();
+        continue;
+      }
 
-  function generateJitsiJWT(roomId) {
+      await this.createConsultation(patient, doctor, io);
+
+      this.patientQueue.dequeue();
+      this.doctorQueue.dequeue();
+    }
+  }
+
+  async createConsultation(patient, doctor, io) {
+    const roomId = `room-${doctor.socketId}-${patient.socketId}`;
+    const patientSocket = io.sockets.sockets.get(patient.socketId);
+    const doctorSocket = io.sockets.sockets.get(doctor.socketId);
+
+    patientSocket.join(roomId);
+    doctorSocket.join(roomId);
+
+    patientSocket.roomId = roomId;
+    doctorSocket.roomId = roomId;
+    this.activeRooms.set(roomId, {
+      patientId: patient.patientId,
+      doctorSocketId: doctor.socketId,
+      patientSocketId: patient.socketId,
+      startTime: Date.now(),
+    });
+
+    io.to(roomId).emit("ROOM_CREATED", {
+      roomId,
+      doctor: doctor.socketId,
+      patient: patient.socketId,
+    });
+
+    // Generate and send meeting link after a short delay
+    setTimeout(() => {
+      const meetingLink = this.generateJitsiMeetingLink(roomId);
+      io.to(roomId).emit("MEETING_LINK", { roomId, meetingLink });
+      console.log(`Meeting link sent: ${meetingLink}`);
+    }, 1000);
+  }
+
+  cleanupRoom(roomId, io) {
+    const room = this.activeRooms.get(roomId);
+    if (room) {
+      io.to(roomId).emit("FORCE_DISCONNECT");
+
+      const sockets = io.sockets.adapter.rooms.get(roomId);
+      if (sockets) {
+        sockets.forEach((socketId) => {
+          const socket = io.sockets.sockets.get(socketId);
+          if (socket) {
+            socket.leave(roomId);
+            delete socket.roomId;
+          }
+        });
+      }
+
+      this.activeRooms.delete(roomId);
+    }
+  }
+
+  generateJitsiMeetingLink(roomId) {
+    const tenant = process.env.JAAS_TENANT;
+    const jwtToken = this.generateJitsiJWT(roomId);
+    return `https://8x8.vc/${tenant}/${roomId}#jwt=${jwtToken}`;
+  }
+
+  generateJitsiJWT(roomId) {
     const payload = {
       aud: "jitsi",
       iss: "chat",
@@ -98,8 +156,9 @@ module.exports = (server) => {
       exp: Math.floor(Date.now() / 1000) + 3600,
       context: {
         user: {
+          avatar: "",
           name: "Doctor-Patient",
-          email: "gutpanamandream21sd@gmail.com",
+          email: "consultation@example.com",
           id: roomId,
         },
         features: {
@@ -110,12 +169,27 @@ module.exports = (server) => {
       },
     };
 
-    return jwt.sign(payload, privateKey, { algorithm: "RS256" });
+    return jwt.sign(payload, this.privateKey, { algorithm: "RS256" });
   }
 
-  function generateJitsiMeetingLink(roomId) {
-    const tenant = process.env.JAAS_TENANT;
-    const jwtToken = generateJitsiJWT(roomId);
-    return `https://8x8.vc/${tenant}/${roomId}#jwt=${jwtToken}`;
+  isSocketConnected(io, socketId) {
+    return io.sockets.sockets.has(socketId);
   }
+}
+
+module.exports = (io) => {
+  const consultationManager = new ConsultationManager();
+
+  io.on("connection", (socket) => {
+    consultationManager.handleConnection(socket, io);
+  });
+
+  // Periodic cleanup of stale rooms
+  setInterval(() => {
+    for (const [roomId, room] of consultationManager.activeRooms) {
+      if (Date.now() - room.startTime > 4 * 60 * 60 * 1000) {
+        consultationManager.cleanupRoom(roomId, io);
+      }
+    }
+  }, 15 * 60 * 1000); 
 };
